@@ -49,7 +49,7 @@ class Publisher(Node):
         config = rs.config()
         self.pipe = rs.pipeline()
         config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-        self.decimate = rs.decimation_filter(1)
+        #self.decimate = rs.decimation_filter(1)
         # decimate.set_option(rs.option.filter_magnitude, 2 ** state.decimate)
 
         d435_attempt = False
@@ -101,7 +101,7 @@ class Publisher(Node):
              self.depth_method()
 
     def depth_method(self):
-        # Get depth frame
+        # Get the depth frame and publish the pointcloud and the reference frame transform
         frames = self.pipe.wait_for_frames()
         depth_frame = frames.get_depth_frame()
         begin = time.time()
