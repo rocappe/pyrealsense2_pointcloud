@@ -56,14 +56,15 @@ class Publisher(Node):
         while d435_attempt == False:
             try:
                 self.pipe.start(config)
-                self.get_logger().info("D435 Found!")
+                self.get_logger().info("Camera Found!")
                 d435_attempt = True
             except RuntimeError:
-                self.get_logger().error("Device not connected. Connect your Intel RealSense D435")
+                self.get_logger().error("Device not connected. Connect your Intel RealSense camera")
 
         # Initialize variables
         qos = QoSProfile(depth=10)
         pointcloud_topic = '/camera/cloud'
+        print(f"Publish pointcloud on topic {pointcloud_topic}")
         self.point_cloud = rs.pointcloud()
         self.mean_time = 0.0
         self.n_data = 0
