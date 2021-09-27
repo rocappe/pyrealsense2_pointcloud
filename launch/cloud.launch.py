@@ -7,10 +7,6 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from ament_index_python.packages import get_package_share_directory, get_package_prefix
 
 def generate_launch_description():
-	pic4track_config = os.path.join(str(Path(__file__).parents[4]), 'src/pic4track_person', 'config')
-	rviz_config_path = os.path.join(pic4track_config, 'cloud.rviz')
-	tb3_path = os.path.join(get_package_share_directory("turtlebot3_bringup"), "launch")
-	
 	depth_robot_tf = Node(
 		package='tf2_ros',
 		executable = 'static_transform_publisher',

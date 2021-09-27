@@ -19,7 +19,6 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 from rclpy.qos import qos_profile_sensor_data
-import math
 
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Header
@@ -32,10 +31,187 @@ from geometry_msgs.msg import TransformStamped
 np.set_printoptions(threshold=sys.maxsize)
 
 
-class Publisher(Node):
+class RealsenseCamera:
+    '''
+    Abstraction of any RealsenseCamera. From https://github.com/ivomarvan/
+    samples_and_experiments/blob/master/Multiple_realsense_cameras/multiple_realsense_cameras.py
+    '''
+    _colorizer = rs.colorizer()
 
+    def __init__(
+        self,
+        serial_number :str,
+        name: str,
+        point_cloud_only: bool
+    ):
+        self._serial_number = serial_number
+        self._name = name
+        self._pipeline = None
+        self._started = False
+        self._pc_only = point_cloud_only
+        
+        self.__start_pipeline()
+
+
+
+    def __del__(self):
+        if self._started and not self._pipeline is None:
+            self._pipeline.stop()
+            
+            
+    def get_full_name(self):
+        return f'{self._name} ({self._serial_number})'
+
+
+    def __start_pipeline(self):
+        # Configure depth and color streams
+        self._pipeline = rs.pipeline()
+        config = rs.config()
+        if self._pc_only:
+            config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+            #self.decimate = rs.decimation_filter(1)
+        config.enable_device(self._serial_number)
+        start_attempt = False
+        while start_attempt == False:
+            try: 
+                self._pipeline.start(config)
+                start_attempt = True
+            except RuntimeError:
+                print("Device not connected. Connect your Intel RealSense camera")
+        self._started = True
+        print(f'{self.get_full_name()} camera is ready.')
+
+
+    def get_frames(self) -> [rs.frame]:
+        '''
+        Return a frame do not care about type
+        '''
+        frameset = self._pipeline.wait_for_frames()
+        if frameset:
+            return [f for f in frameset]
+        else:
+            return []
+
+    def get_frameset(self) -> rs.frame:
+        return self._pipeline.wait_for_frames()
+    
+    def get_depth_frame(self) -> rs.depth_frame: 
+        frameset = self._pipeline.wait_for_frames()
+        return frameset.get_depth_frame()
+
+    @classmethod
+    def get_title(cls, frame: rs.frame, whole: bool) -> str:
+        # <pyrealsense2.video_stream_profile: Fisheye(2) 848x800 @ 30fps Y8>
+        profile_str = str(frame.profile)
+        first_space_pos = profile_str.find(' ')
+        whole_title = profile_str[first_space_pos + 1: -1]
+        if whole:
+            return whole_title
+        return whole_title.split(' ')[0]
+
+
+    @classmethod
+    def get_images_from_video_frames(cls, frames: [rs.frame]) -> ([(np.ndarray, rs.frame)] , [rs.frame], int, int):
+        '''
+        From all the frames, it selects those that can be easily interpreted as pictures.
+        Converts them to images and finds the maximum width and maximum height from all of them.
+        '''
+        max_width = -1
+        max_height = -1
+        img_frame_tuples = []
+        unused_frames = []
+        for frame in frames:
+            if frame.is_video_frame():
+                if frame.is_depth_frame():
+                    img = np.asanyarray(RealsenseCamera._colorizer.process(frame).get_data())
+                else:
+                    img = np.asanyarray(frame.get_data())
+                    img = img[...,::-1].copy()  # RGB<->BGR
+                max_height = max(max_height, img.shape[0])
+                max_width  = max(max_width, img.shape[1])
+                img_frame_tuples.append((img,frame))
+            else:
+                unused_frames.append(frame)
+        return img_frame_tuples, unused_frames, max_width, max_height
+
+
+
+
+class AllCamerasLoop:
+    '''
+    Take info from all connected cameras in the loop. From https://github.com/ivomarvan/
+    samples_and_experiments/blob/master/Multiple_realsense_cameras/multiple_realsense_cameras.py
+    '''
+
+    def __init__(self, point_cloud_only: False):
+        self._cameras = self.get_all_connected_cameras(point_cloud_only)
+
+    def get_frames(self) -> [rs.frame]:
+        '''
+        Return frames in given order. 
+        '''
+        ret_frames = []
+
+        for camera in self._cameras:
+            frames = camera.get_frames()
+            if frames:
+                ret_frames += frames
+        return ret_frames
+    
+    
+    def get_depth_frames(self) -> [rs.depth_frame]:
+        ret_frames = []
+
+        for camera in self._cameras:
+            frame = camera.get_depth_frame()
+            if frame:
+                ret_frames.append(frame)
+        return ret_frames
+
+    def __get_window_name(self):
+        s = ''
+        for camera in self._cameras:
+            if s:
+                s += ', '
+            s += camera.get_full_name()
+        return s
+    
+     
+    def __get_connected_cameras_info(self, camera_name_suffix: str = 'T265') -> [(str, str)]:
+        '''
+        Return list of (serial number,names) conected devices.
+        Eventualy only fit given suffix (like T265, D415, ...)
+        (based on https://github.com/IntelRealSense/librealsense/issues/2332)
+        '''
+        ret_list = []
+        ctx = rs.context()
+        for d in ctx.devices:
+            serial_number = d.get_info(rs.camera_info.serial_number)
+            name = d.get_info(rs.camera_info.name)
+            if camera_name_suffix and not name.endswith(camera_name_suffix):
+                continue
+            ret_list.append((serial_number, name))
+        return ret_list
+
+
+    def get_all_connected_cameras(self, point_cloud_only: bool) -> [RealsenseCamera]:
+        cameras = self.__get_connected_cameras_info(camera_name_suffix=None)
+        return [RealsenseCamera(serial_number, name, point_cloud_only) for serial_number, name in cameras]
+
+    def run_loop(self):
+        stop = False
+        window = ImgWindow(name=self.__get_window_name())
+        while not stop:
+            frames = self.get_frames()
+            window.swow(self.__frames_interpreter.get_image_from_frames(frames))
+            stop = window.is_stopped()
+
+
+
+class Publisher(Node):
+    time_it = False
     # Initialization of the class
-    def __init__(self):
+    def __init__(self, multiple_cameras=False):
         super().__init__('cloud_publisher')
 
         # Initialize logs level
@@ -45,21 +221,9 @@ class Publisher(Node):
             log_level = 20
             self.get_logger().info("LOG_LEVEL not defined, setting default: INFO")
 
-        # Initialize RealSense D435 camera
-        config = rs.config()
-        self.pipe = rs.pipeline()
-        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-        #self.decimate = rs.decimation_filter(1)
-        # decimate.set_option(rs.option.filter_magnitude, 2 ** state.decimate)
+        # Initialize RealSense cameras
+        self.camera_loop = AllCamerasLoop(point_cloud_only=True)
 
-        d435_attempt = False
-        while d435_attempt == False:
-            try:
-                self.pipe.start(config)
-                self.get_logger().info("Camera Found!")
-                d435_attempt = True
-            except RuntimeError:
-                self.get_logger().error("Device not connected. Connect your Intel RealSense camera")
 
         # Initialize variables
         qos = QoSProfile(depth=10)
@@ -103,11 +267,12 @@ class Publisher(Node):
 
     def depth_method(self):
         # Get the depth frame and publish the pointcloud and the reference frame transform
-        frames = self.pipe.wait_for_frames()
-        depth_frame = frames.get_depth_frame()
-        begin = time.time()
-        depth_frame = self.decimate.process(depth_frame)
-        points = self.point_cloud.calculate(depth_frame)
+        depth_frames = self.camera_loop.get_depth_frames()
+        #depth_frame = frames.get_depth_frame()
+        if time_it:
+            begin = time.time()
+        #depth_frame = self.decimate.process(depth_frame)
+        points = self.point_cloud.calculate(depth_frames[0])
         v = points.get_vertices()
         verts = np.asanyarray(v).view(np.float32).reshape(-1, 3)
         verts_trans = np.transpose(verts.copy())
@@ -117,21 +282,27 @@ class Publisher(Node):
         pc_msg_rot = self.point_cloud_message(verts_rot, "depth_frame")
         self.pc_pub.publish(pc_msg)
         self.pc_pub_rot.publish(pc_msg_rot)
-        self.br.sendTransform(self.tf_message(pc_msg.header.stamp))
-        end = time.time()
-        if self.mean_time == 0.0:
-                self.mean_time = end - begin
-                self.n_data = 1
-        else:
-                self.mean_time = (self.mean_time * self.n_data + end - begin) / (self.n_data + 1)
-                self.n_data += 1
-        if self.n_data % 20 == 0:
-                self.get_logger().debug(f"Mean computing time: {self.mean_time:.3f}")
-                
+        self.publish_tf_transform
+        if time_it:
+            end = time.time()
+            if self.mean_time == 0.0:
+                    self.mean_time = end - begin
+                    self.n_data = 1
+            else:
+                    self.mean_time = (self.mean_time * self.n_data + end - begin) / (self.n_data + 1)
+                    self.n_data += 1
+            if self.n_data % 20 == 0:
+                    self.get_logger().debug(f"Mean computing time: {self.mean_time:.3f}")
+                    
+    
+    def publish_tf_transform(self):
+        self.br.sendTransform(self.tf_message_camera0(pc_msg.header.stamp))
 
-    def tf_message(self, stamp):
+
+    def tf_message_camera0(self, stamp):
         tf_msg = TransformStamped()
         tf_msg.header.stamp = stamp
+        tf_msg.header.frame_id = "base_link"
         quat = self.quaternion_from_euler(-1.5708, 0, -1.5708)
         tf_msg.child_frame_id = "depth_frame"
         tf_msg.transform.translation.x = 0.0
@@ -210,13 +381,18 @@ class Publisher(Node):
             + quat[3] * quat[3])
         norm_quat = [entry / norm for entry in quat]
         return norm_quat
+    
+    def get_camera_extrinsics(self):
+    ''' Method that gets the camera extrinsics for each camera serial number, from a yaml file
+    '''
+        return
                 
 ################################# MAIN #############################################
 
 
-def main(args=None):
+def main(multiple_cameras=False):
     rclpy.init()
-    publisher = Publisher()
+    publisher = Publisher(multiple_cameras=False)
 
     try:
             rclpy.spin(publisher)
@@ -228,6 +404,3 @@ def main(args=None):
 
 if __name__ == '__main__':
         main()
-
-
-        tf_msg.header.frame_id = "base_link"
